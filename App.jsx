@@ -759,8 +759,13 @@ function SpotifyPanel({ connected, setConnected }) {
           if (active) setPlayback(data);
         } else if (res.status === 204) {
           if (active) setPlayback(null);
+        } else {
+          const body = await res.json().catch(() => ({}));
+          if (active) setActionMsg(body?.error?.message || `재생 상태를 가져오지 못했어요 (${res.status})`);
         }
-      } catch (e) {}
+      } catch (e) {
+        if (active) setActionMsg(e.message);
+      }
     };
     poll();
     const id = setInterval(poll, 4000);
@@ -910,6 +915,12 @@ function SpotifyPanel({ connected, setConnected }) {
                   onChange={(e) => changeVolume(Number(e.target.value))}
                 />
               </div>
+            </div>
+          )}
+
+          {!playback?.item && (
+            <div className="empty" style={{ marginBottom: 14 }}>
+              지금 재생 중인 게 없어요. 아래에서 플레이리스트를 눌러 재생을 시작해보세요.
             </div>
           )}
 
