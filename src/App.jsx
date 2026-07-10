@@ -4,6 +4,13 @@ import {
   SkipForward, RotateCcw, Music, Search, Check, Volume2, VolumeX,
   Link2, ListMusic, Square, Heart, Bluetooth, BluetoothOff,
 } from "lucide-react";
+import {
+  DndContext, closestCenter, PointerSensor, useSensor, useSensors,
+} from "@dnd-kit/core";
+import {
+  SortableContext, verticalListSortingStrategy, useSortable, arrayMove,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 
 const TYPES = {
   AMRAP: { label: "AMRAP", full: "As Many Rounds As Possible", color: "#C6F135", dark: "#3a4406" },
@@ -96,12 +103,17 @@ function beep(freq = 880, dur = 0.12, ctxRef) {
 export default function App() {
   const [blocks, setBlocks] = useState([]);
   const [view, setView] = useState("build"); // build | run
-  const [dragIndex, setDragIndex] = useState(null);
   const [muted, setMuted] = useState(false);
   const soundCtx = useRef(null);
   const [prepEnabled, setPrepEnabled] = useState(true);
   const [prepMinutes, setPrepMinutes] = useState(0);
   const [prepSeconds, setPrepSeconds] = useState(10);
+
+  // Long-press (250ms) before a drag starts, so a normal tap/scroll isn't
+  // hijacked — this is what makes reordering work with touch on iPhone/iPad.
+  const dndSensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { delay: 250, tolerance: 6 } })
+  );
 
   const [hrSupported] = useState(typeof navigator !== "undefined" && !!navigator.bluetooth);
   const [hrConnected, setHrConnected] = useState(false);
@@ -125,9 +137,9 @@ export default function App() {
     setHrError("");
     try {
       const device = await navigator.bluetooth.requestDevice({
-  acceptAllDevices: true,
-  optionalServices: ["heart_rate"],
-});
+        acceptAllDevices: true,
+        optionalServices: ["heart_rate"],
+      });
       hrDeviceRef.current = device;
       device.addEventListener("gattserverdisconnected", () => {
         setHrConnected(false);
@@ -214,15 +226,15 @@ export default function App() {
     });
   };
 
-  const onDrop = (idx) => {
-    if (dragIndex === null || dragIndex === idx) return;
+  const handleDragEnd = (event) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
     setBlocks((prev) => {
-      const next = [...prev];
-      const [moved] = next.splice(dragIndex, 1);
-      next.splice(idx, 0, moved);
-      return next;
+      const oldIndex = prev.findIndex((b) => b.id === active.id);
+      const newIndex = prev.findIndex((b) => b.id === over.id);
+      if (oldIndex === -1 || newIndex === -1) return prev;
+      return arrayMove(prev, oldIndex, newIndex);
     });
-    setDragIndex(null);
   };
 
   const totalDuration = blocks.reduce((sum, b) => sum + blockDuration(b), 0);
@@ -328,9 +340,13 @@ export default function App() {
         .timeline-meta { display: flex; justify-content: space-between; font-size: 11px; color: #5c5b52; }
         .cart-item {
           display: flex; align-items: center; gap: 10px; background: #0E0F0D; border: 1px solid #2A2B25;
-          border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; cursor: grab;
+          border-radius: 10px; padding: 10px 12px; margin-bottom: 8px;
         }
-        .cart-item.dragging { opacity: .4; }
+        .drag-handle {
+          display: flex; align-items: center; cursor: grab; touch-action: none; padding: 4px;
+          margin: -4px; flex-shrink: 0;
+        }
+        .drag-handle:active { cursor: grabbing; }
         .cart-badge {
           font-size: 10px; font-weight: 700; letter-spacing: .5px; padding: 4px 8px; border-radius: 5px;
           flex-shrink: 0;
@@ -448,7 +464,7 @@ export default function App() {
         <BuildView
           form={form} setForm={setForm} addBlock={addBlock}
           blocks={blocks} removeBlock={removeBlock} moveBlock={moveBlock}
-          dragIndex={dragIndex} setDragIndex={setDragIndex} onDrop={onDrop}
+          dndSensors={dndSensors} handleDragEnd={handleDragEnd}
           totalDuration={totalDuration}
           onStart={() => blocks.length && setView("run")}
           prepEnabled={prepEnabled} setPrepEnabled={setPrepEnabled}
@@ -474,8 +490,41 @@ export default function App() {
   );
 }
 
+function SortableCartItem({ block: b, onMoveUp, onMoveDown, onRemove }) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: b.id });
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+    zIndex: isDragging ? 10 : "auto",
+  };
+  return (
+    <div ref={setNodeRef} style={style} className="cart-item">
+      <span className="drag-handle" {...attributes} {...listeners}>
+        <GripVertical size={15} color="#5c5b52" />
+      </span>
+      <span className="cart-badge" style={{ background: TYPES[b.type].color, color: TYPES[b.type].dark }}>
+        {TYPES[b.type].label}
+      </span>
+      <div className="cart-info">
+        <div className="t1">{b.label || TYPES[b.type].full}</div>
+        <div className="t2">
+          {b.rounds > 1 ? `${b.rounds}라운드 × ` : ""}{fmt(b.workSeconds)}
+          {b.direction === "up" ? " 정카운트" : " 역카운트"}
+          {b.restEnabled && b.rounds > 1 ? ` · 휴식 ${fmt(b.restSeconds)}` : ""}
+        </div>
+      </div>
+      <div className="cart-controls">
+        <button className="icon-btn" onClick={onMoveUp}><ChevronUp size={15} /></button>
+        <button className="icon-btn" onClick={onMoveDown}><ChevronDown size={15} /></button>
+        <button className="icon-btn" onClick={onRemove}><X size={15} /></button>
+      </div>
+    </div>
+  );
+}
+
 function BuildView({
-  form, setForm, addBlock, blocks, removeBlock, moveBlock, dragIndex, setDragIndex, onDrop, totalDuration, onStart,
+  form, setForm, addBlock, blocks, removeBlock, moveBlock, dndSensors, handleDragEnd, totalDuration, onStart,
   prepEnabled, setPrepEnabled, prepMinutes, setPrepMinutes, prepSeconds, setPrepSeconds,
   hrSupported, hrConnected, hrValue, hrDeviceName, hrError, connectHeartRate, disconnectHeartRate,
   groupName, setGroupName, groupCode, setGroupCode, groupJoined, setGroupJoined, roster,
@@ -580,34 +629,18 @@ function BuildView({
               </div>
 
               <div style={{ marginTop: 16 }}>
-                {blocks.map((b, idx) => (
-                  <div
-                    key={b.id}
-                    className={`cart-item ${dragIndex === idx ? "dragging" : ""}`}
-                    draggable
-                    onDragStart={() => setDragIndex(idx)}
-                    onDragOver={(e) => e.preventDefault()}
-                    onDrop={() => onDrop(idx)}
-                  >
-                    <GripVertical size={15} color="#5c5b52" />
-                    <span className="cart-badge" style={{ background: TYPES[b.type].color, color: TYPES[b.type].dark }}>
-                      {TYPES[b.type].label}
-                    </span>
-                    <div className="cart-info">
-                      <div className="t1">{b.label || TYPES[b.type].full}</div>
-                      <div className="t2">
-                        {b.rounds > 1 ? `${b.rounds}라운드 × ` : ""}{fmt(b.workSeconds)}
-                        {b.direction === "up" ? " 정카운트" : " 역카운트"}
-                        {b.restEnabled && b.rounds > 1 ? ` · 휴식 ${fmt(b.restSeconds)}` : ""}
-                      </div>
-                    </div>
-                    <div className="cart-controls">
-                      <button className="icon-btn" onClick={() => moveBlock(idx, -1)}><ChevronUp size={15} /></button>
-                      <button className="icon-btn" onClick={() => moveBlock(idx, 1)}><ChevronDown size={15} /></button>
-                      <button className="icon-btn" onClick={() => removeBlock(b.id)}><X size={15} /></button>
-                    </div>
-                  </div>
-                ))}
+                <DndContext sensors={dndSensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+                  <SortableContext items={blocks.map((b) => b.id)} strategy={verticalListSortingStrategy}>
+                    {blocks.map((b, idx) => (
+                      <SortableCartItem
+                        key={b.id} block={b} idx={idx}
+                        onMoveUp={() => moveBlock(idx, -1)}
+                        onMoveDown={() => moveBlock(idx, 1)}
+                        onRemove={() => removeBlock(b.id)}
+                      />
+                    ))}
+                  </SortableContext>
+                </DndContext>
               </div>
 
               <div className="toggle-row" style={{ marginTop: 16 }}>
