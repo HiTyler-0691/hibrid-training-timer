@@ -125,8 +125,9 @@ export default function App() {
     setHrError("");
     try {
       const device = await navigator.bluetooth.requestDevice({
-        filters: [{ services: ["heart_rate"] }],
-      });
+  acceptAllDevices: true,
+  optionalServices: ["heart_rate"],
+});
       hrDeviceRef.current = device;
       device.addEventListener("gattserverdisconnected", () => {
         setHrConnected(false);
