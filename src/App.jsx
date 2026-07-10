@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import {
   Plus, X, GripVertical, ChevronUp, ChevronDown, Play, Pause,
-  SkipForward, RotateCcw, Music, Search, Check, Volume2, VolumeX,
+  SkipForward, SkipBack, RotateCcw, Music, Search, Check, Volume2, VolumeX,
   Link2, ListMusic, Square, Heart, Bluetooth, BluetoothOff,
 } from "lucide-react";
 import {
@@ -393,6 +393,16 @@ export default function App() {
         .sp-dot { width: 7px; height: 7px; border-radius: 50%; background: #5c5b52; }
         .sp-dot.on { background: #1DB954; }
         .sp-tabs { display: flex; gap: 6px; margin-bottom: 12px; }
+        .now-playing {
+          display: flex; align-items: center; gap: 10px; background: #0E0F0D; border: 1px solid #2A2B25;
+          border-radius: 10px; padding: 10px 12px; margin-bottom: 14px;
+        }
+        .now-playing .track-info { flex: 1; min-width: 0; }
+        .now-playing-controls { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
+        .volume-control { display: flex; align-items: center; gap: 6px; flex-shrink: 0; width: 90px; }
+        .volume-control input[type="range"] {
+          flex: 1; height: 3px; accent-color: #1DB954; background: #2A2B25; cursor: pointer;
+        }
         .sp-tab {
           flex: 1; font-family: inherit; border: 1px solid #2A2B25; background: #0E0F0D; color: #9C9A8E;
           padding: 7px; border-radius: 8px; cursor: pointer; font-size: 12px;
@@ -732,6 +742,75 @@ function SpotifyPanel({ connected, setConnected }) {
   const [selected, setSelected] = useState(null);
   const [loading, setLoading] = useState(false);
   const [actionMsg, setActionMsg] = useState("");
+  const [playback, setPlayback] = useState(null);
+  const volumeDebounce = useRef(null);
+
+  useEffect(() => {
+    if (!connected) {
+      setPlayback(null);
+      return;
+    }
+    let active = true;
+    const poll = async () => {
+      try {
+        const res = await spotifyFetch("/me/player");
+        if (res.status === 200) {
+          const data = await res.json();
+          if (active) setPlayback(data);
+        } else if (res.status === 204) {
+          if (active) setPlayback(null);
+        } else {
+          const body = await res.json().catch(() => ({}));
+          if (active) setActionMsg(body?.error?.message || `재생 상태를 가져오지 못했어요 (${res.status})`);
+        }
+      } catch (e) {
+        if (active) setActionMsg(e.message);
+      }
+    };
+    poll();
+    const id = setInterval(poll, 4000);
+    return () => {
+      active = false;
+      clearInterval(id);
+    };
+  }, [connected]);
+
+  const togglePlayPause = async () => {
+    if (!playback) return;
+    const wasPlaying = playback.is_playing;
+    setPlayback((p) => (p ? { ...p, is_playing: !wasPlaying } : p));
+    try {
+      await spotifyFetch(wasPlaying ? "/me/player/pause" : "/me/player/play", { method: "PUT" });
+    } catch (e) {
+      setActionMsg(e.message);
+    }
+  };
+
+  const skipTrack = async (direction) => {
+    try {
+      await spotifyFetch(`/me/player/${direction}`, { method: "POST" });
+      setTimeout(() => {
+        spotifyFetch("/me/player")
+          .then((res) => (res.status === 200 ? res.json() : null))
+          .then((data) => data && setPlayback(data))
+          .catch(() => {});
+      }, 500);
+    } catch (e) {
+      setActionMsg(e.message);
+    }
+  };
+
+  const changeVolume = (value) => {
+    setPlayback((p) => (p ? { ...p, device: { ...p.device, volume_percent: value } } : p));
+    clearTimeout(volumeDebounce.current);
+    volumeDebounce.current = setTimeout(async () => {
+      try {
+        await spotifyFetch(`/me/player/volume?volume_percent=${value}`, { method: "PUT" });
+      } catch (e) {
+        setActionMsg(e.message);
+      }
+    }, 300);
+  };
 
   useEffect(() => {
     if (!connected) return;
@@ -802,6 +881,49 @@ function SpotifyPanel({ connected, setConnected }) {
         </button>
       ) : (
         <>
+          {playback?.item && (
+            <div className="now-playing">
+              <div className="pl-thumb">
+                {playback.item.album?.images?.[playback.item.album.images.length - 1]?.url ? (
+                  <img
+                    src={playback.item.album.images[playback.item.album.images.length - 1].url}
+                    alt=""
+                    style={{ width: "100%", height: "100%", borderRadius: 6, objectFit: "cover" }}
+                  />
+                ) : (
+                  <Music size={14} />
+                )}
+              </div>
+              <div className="track-info">
+                <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{playback.item.name}</div>
+                <div style={{ fontSize: 11, color: "#9C9A8E", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {playback.item.artists?.map((a) => a.name).join(", ")}
+                </div>
+              </div>
+              <div className="now-playing-controls">
+                <button className="icon-btn" onClick={() => skipTrack("previous")}><SkipBack size={16} /></button>
+                <button className="icon-btn" onClick={togglePlayPause}>
+                  {playback.is_playing ? <Pause size={18} /> : <Play size={18} />}
+                </button>
+                <button className="icon-btn" onClick={() => skipTrack("next")}><SkipForward size={16} /></button>
+              </div>
+              <div className="volume-control">
+                <Volume2 size={14} color="#9C9A8E" />
+                <input
+                  type="range" min={0} max={100}
+                  value={playback.device?.volume_percent ?? 50}
+                  onChange={(e) => changeVolume(Number(e.target.value))}
+                />
+              </div>
+            </div>
+          )}
+
+          {!playback?.item && (
+            <div className="empty" style={{ marginBottom: 14 }}>
+              지금 재생 중인 게 없어요. 아래에서 플레이리스트를 눌러 재생을 시작해보세요.
+            </div>
+          )}
+
           <div className="sp-tabs">
             <button className={`sp-tab ${tab === "playlists" ? "active" : ""}`} onClick={() => setTab("playlists")}>
               <ListMusic size={13} style={{ marginRight: 4, verticalAlign: -2 }} /> 내 플레이리스트
