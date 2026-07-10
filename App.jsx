@@ -135,8 +135,9 @@ export default function App() {
 
   const connectHeartRate = useCallback(async () => {
     setHrError("");
+    let device;
     try {
-      const device = await navigator.bluetooth.requestDevice({
+      device = await navigator.bluetooth.requestDevice({
         filters: [
           { services: ["heart_rate"] },
           { namePrefix: "Amazfit" },
@@ -159,7 +160,14 @@ export default function App() {
       setHrDeviceName(device.name || "심박 센서");
       setHrConnected(true);
     } catch (e) {
-      setHrError(e?.message || "연결에 실패했어요.");
+      // Wrong device selected (no heart_rate service) or user cancelled — disconnect
+      // cleanly so the next attempt starts fresh instead of leaving a dangling GATT link.
+      if (device?.gatt?.connected) device.gatt.disconnect();
+      setHrError(
+        e?.name === "NotFoundError"
+          ? "이 기기에는 심박 서비스가 없어요. 다른 후보를 선택해보세요."
+          : e?.message || "연결에 실패했어요."
+      );
     }
   }, [handleHRNotification]);
 
