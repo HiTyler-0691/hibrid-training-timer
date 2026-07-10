@@ -11,6 +11,9 @@ import {
   SortableContext, verticalListSortingStrategy, useSortable, arrayMove,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
+import {
+  redirectToSpotifyLogin, handleSpotifyRedirect, isSpotifyConnected, spotifyLogout, spotifyFetch,
+} from "./spotify.js";
 
 const TYPES = {
   AMRAP: { label: "AMRAP", full: "As Many Rounds As Possible", color: "#C6F135", dark: "#3a4406" },
@@ -109,6 +112,13 @@ export default function App() {
   const [prepMinutes, setPrepMinutes] = useState(0);
   const [prepSeconds, setPrepSeconds] = useState(10);
 
+  const [spotifyConnected, setSpotifyConnected] = useState(isSpotifyConnected());
+  useEffect(() => {
+    handleSpotifyRedirect().then((justConnected) => {
+      if (justConnected) setSpotifyConnected(true);
+    });
+  }, []);
+
   // Long-press (250ms) before a drag starts, so a normal tap/scroll isn't
   // hijacked — this is what makes reordering work with touch on iPhone/iPad.
   const dndSensors = useSensors(
@@ -135,9 +145,15 @@ export default function App() {
 
   const connectHeartRate = useCallback(async () => {
     setHrError("");
+    let device;
     try {
-      const device = await navigator.bluetooth.requestDevice({
-        acceptAllDevices: true,
+      device = await navigator.bluetooth.requestDevice({
+        filters: [
+          { services: ["heart_rate"] },
+          { namePrefix: "Amazfit" },
+          { namePrefix: "T-Rex" },
+          { namePrefix: "Zepp" },
+        ],
         optionalServices: ["heart_rate"],
       });
       hrDeviceRef.current = device;
@@ -154,7 +170,14 @@ export default function App() {
       setHrDeviceName(device.name || "심박 센서");
       setHrConnected(true);
     } catch (e) {
-      setHrError(e?.message || "연결에 실패했어요.");
+      // Wrong device selected (no heart_rate service) or user cancelled — disconnect
+      // cleanly so the next attempt starts fresh instead of leaving a dangling GATT link.
+      if (device?.gatt?.connected) device.gatt.disconnect();
+      setHrError(
+        e?.name === "NotFoundError"
+          ? "이 기기에는 심박 서비스가 없어요. 다른 후보를 선택해보세요."
+          : e?.message || "연결에 실패했어요."
+      );
     }
   }, [handleHRNotification]);
 
@@ -473,6 +496,7 @@ export default function App() {
           hrSupported={hrSupported} hrConnected={hrConnected} hrValue={hrValue}
           hrDeviceName={hrDeviceName} hrError={hrError}
           connectHeartRate={connectHeartRate} disconnectHeartRate={disconnectHeartRate}
+          spotifyConnected={spotifyConnected} setSpotifyConnected={setSpotifyConnected}
           groupName={groupName} setGroupName={setGroupName}
           groupCode={groupCode} setGroupCode={setGroupCode}
           groupJoined={groupJoined} setGroupJoined={setGroupJoined}
@@ -527,6 +551,7 @@ function BuildView({
   form, setForm, addBlock, blocks, removeBlock, moveBlock, dndSensors, handleDragEnd, totalDuration, onStart,
   prepEnabled, setPrepEnabled, prepMinutes, setPrepMinutes, prepSeconds, setPrepSeconds,
   hrSupported, hrConnected, hrValue, hrDeviceName, hrError, connectHeartRate, disconnectHeartRate,
+  spotifyConnected, setSpotifyConnected,
   groupName, setGroupName, groupCode, setGroupCode, groupJoined, setGroupJoined, roster,
 }) {
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
@@ -675,7 +700,7 @@ function BuildView({
         </div>
 
         <div className="card">
-          <SpotifyPanel />
+          <SpotifyPanel connected={spotifyConnected} setConnected={setSpotifyConnected} />
         </div>
 
         <div className="card">
@@ -699,35 +724,80 @@ function BuildView({
   );
 }
 
-function SpotifyPanel() {
-  const [connected, setConnected] = useState(false);
+function SpotifyPanel({ connected, setConnected }) {
   const [tab, setTab] = useState("playlists");
   const [query, setQuery] = useState("");
+  const [playlists, setPlaylists] = useState([]);
+  const [tracks, setTracks] = useState([]);
   const [selected, setSelected] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [actionMsg, setActionMsg] = useState("");
 
-  const playlists = [
-    { id: 1, name: "WOD 파워 믹스", tracks: 42 },
-    { id: 2, name: "테크노 HIIT", tracks: 30 },
-    { id: 3, name: "쿨다운 로파이", tracks: 18 },
-  ];
-  const searchResults = query
-    ? [
-        { id: "s1", name: `${query} (Radio Edit)`, artist: "Artist A" },
-        { id: "s2", name: `${query} Remix`, artist: "Artist B" },
-        { id: "s3", name: query, artist: "Artist C" },
-      ]
-    : [];
+  useEffect(() => {
+    if (!connected) return;
+    setLoading(true);
+    spotifyFetch("/me/playlists?limit=20")
+      .then((res) => res.json())
+      .then((data) => setPlaylists(data.items || []))
+      .catch(() => setActionMsg("플레이리스트를 불러오지 못했어요."))
+      .finally(() => setLoading(false));
+  }, [connected]);
+
+  useEffect(() => {
+    if (!connected || tab !== "search" || !query.trim()) {
+      setTracks([]);
+      return;
+    }
+    const timer = setTimeout(() => {
+      spotifyFetch(`/search?type=track&limit=8&q=${encodeURIComponent(query)}`)
+        .then((res) => res.json())
+        .then((data) => setTracks(data.tracks?.items || []))
+        .catch(() => setActionMsg("검색에 실패했어요."));
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [query, tab, connected]);
+
+  const playPlaylist = async (playlist) => {
+    setSelected(playlist.id);
+    setActionMsg("");
+    try {
+      const res = await spotifyFetch("/me/player/play", {
+        method: "PUT",
+        body: JSON.stringify({ context_uri: playlist.uri }),
+      });
+      if (res.status === 204) {
+        setActionMsg(`"${playlist.name}" 재생 시작!`);
+      } else if (res.status === 404) {
+        setActionMsg("재생 중인 기기가 없어요. 폰이나 컴퓨터에서 Spotify 앱을 한 번 열어 아무 곡이나 재생해두고 다시 시도해주세요.");
+      } else {
+        const body = await res.json().catch(() => ({}));
+        setActionMsg(body?.error?.message || "재생에 실패했어요.");
+      }
+    } catch (e) {
+      setActionMsg(e.message);
+    }
+  };
+
+  const queueTrack = async (track) => {
+    setActionMsg("");
+    try {
+      const res = await spotifyFetch(`/me/player/queue?uri=${encodeURIComponent(track.uri)}`, { method: "POST" });
+      setActionMsg(res.status === 204 ? `"${track.name}" 대기열에 추가!` : "대기열 추가에 실패했어요. 재생 중인 기기가 있는지 확인해주세요.");
+    } catch (e) {
+      setActionMsg(e.message);
+    }
+  };
 
   return (
     <>
       <h2>Spotify 연동</h2>
       <div className="sp-status">
-        <span className={`sp-dot ${connected ? "on" : ""}`} />
+        <span className={`sp-dot ${connected ? "on" : ""}`} style={connected ? { background: "#1DB954" } : {}} />
         {connected ? "내 계정에 연결됨" : "연결되지 않음"}
       </div>
 
       {!connected ? (
-        <button className="btn" style={{ width: "100%", justifyContent: "center" }} onClick={() => setConnected(true)}>
+        <button className="btn" style={{ width: "100%", justifyContent: "center" }} onClick={redirectToSpotifyLogin}>
           <Link2 size={14} /> Spotify 계정 연결
         </button>
       ) : (
@@ -743,12 +813,20 @@ function SpotifyPanel() {
 
           {tab === "playlists" ? (
             <div>
+              {loading && <div className="empty">불러오는 중...</div>}
+              {!loading && playlists.length === 0 && <div className="empty">저장된 플레이리스트가 없어요.</div>}
               {playlists.map((p) => (
-                <div key={p.id} className={`pl-item ${selected === p.id ? "selected" : ""}`} onClick={() => setSelected(p.id)}>
-                  <div className="pl-thumb"><Music size={16} /></div>
-                  <div style={{ flex: 1 }}>
-                    <div>{p.name}</div>
-                    <div style={{ fontSize: 11, color: "#9C9A8E" }}>{p.tracks}곡</div>
+                <div key={p.id} className={`pl-item ${selected === p.id ? "selected" : ""}`} onClick={() => playPlaylist(p)}>
+                  <div className="pl-thumb">
+                    {p.images?.[0]?.url ? (
+                      <img src={p.images[0].url} alt="" style={{ width: "100%", height: "100%", borderRadius: 6, objectFit: "cover" }} />
+                    ) : (
+                      <Music size={16} />
+                    )}
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
+                    <div style={{ fontSize: 11, color: "#9C9A8E" }}>{p.tracks?.total ?? 0}곡</div>
                   </div>
                   {selected === p.id && <Check size={15} color="#1DB954" />}
                 </div>
@@ -759,24 +837,40 @@ function SpotifyPanel() {
               <div className="search-box">
                 <input type="text" placeholder="곡, 아티스트 검색" value={query} onChange={(e) => setQuery(e.target.value)} />
               </div>
-              {searchResults.map((t) => (
-                <div key={t.id} className="track-item">
-                  <div className="pl-thumb"><Music size={14} /></div>
-                  <div style={{ flex: 1 }}>
-                    <div>{t.name}</div>
-                    <div style={{ fontSize: 11, color: "#9C9A8E" }}>{t.artist}</div>
+              {tracks.map((t) => (
+                <div key={t.id} className="track-item" onClick={() => queueTrack(t)}>
+                  <div className="pl-thumb">
+                    {t.album?.images?.[t.album.images.length - 1]?.url ? (
+                      <img
+                        src={t.album.images[t.album.images.length - 1].url}
+                        alt=""
+                        style={{ width: "100%", height: "100%", borderRadius: 6, objectFit: "cover" }}
+                      />
+                    ) : (
+                      <Music size={14} />
+                    )}
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.name}</div>
+                    <div style={{ fontSize: 11, color: "#9C9A8E" }}>{t.artists?.map((a) => a.name).join(", ")}</div>
                   </div>
                   <Plus size={14} color="#9C9A8E" />
                 </div>
               ))}
             </div>
           )}
+
+          {actionMsg && <div style={{ fontSize: 12, color: "#9C9A8E", marginTop: 10 }}>{actionMsg}</div>}
+
+          <button
+            className="btn"
+            style={{ width: "100%", justifyContent: "center", marginTop: 12 }}
+            onClick={() => { spotifyLogout(); setConnected(false); }}
+          >
+            연결 해제
+          </button>
         </>
       )}
-      <div className="note">
-        실제 재생을 붙이려면 본인 Spotify 개발자 계정에서 앱을 등록하고(Client ID),
-        Web Playback SDK와 Web API로 연결해야 합니다. 지금은 흐름을 보여주는 목업이에요.
-      </div>
     </>
   );
 }
