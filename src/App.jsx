@@ -394,14 +394,21 @@ export default function App() {
         .sp-dot.on { background: #1DB954; }
         .sp-tabs { display: flex; gap: 6px; margin-bottom: 12px; }
         .now-playing {
-          display: flex; align-items: center; gap: 10px; background: #0E0F0D; border: 1px solid #2A2B25;
-          border-radius: 10px; padding: 10px 12px; margin-bottom: 14px;
+          display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; background: #0E0F0D;
+          border: 1px solid #2A2B25; border-radius: 10px; padding: 10px 12px; margin-bottom: 14px;
+          max-width: 100%; box-sizing: border-box;
         }
-        .now-playing .track-info { flex: 1; min-width: 0; }
+        .now-playing .track-info { flex: 1 1 120px; min-width: 90px; }
         .now-playing-controls { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
-        .volume-control { display: flex; align-items: center; gap: 6px; flex-shrink: 0; width: 90px; }
+        .volume-control {
+          display: flex; align-items: center; gap: 6px; flex: 1 1 100%; min-width: 0; order: 3;
+        }
         .volume-control input[type="range"] {
-          flex: 1; height: 3px; accent-color: #1DB954; background: #2A2B25; cursor: pointer;
+          flex: 1; width: 100%; min-width: 0; height: 3px; accent-color: #1DB954; background: #2A2B25;
+          cursor: pointer; box-sizing: border-box;
+        }
+        @media (min-width: 380px) {
+          .volume-control { flex: 0 1 100px; order: 0; }
         }
         .sp-tab {
           flex: 1; font-family: inherit; border: 1px solid #2A2B25; background: #0E0F0D; color: #9C9A8E;
